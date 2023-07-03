@@ -9,7 +9,7 @@ from flax import struct, serialization
 from flax.training import train_state
 from tqdm import tqdm
 
-from dqn_model import MLP
+from models.mlp_jax import MLP
 from dqn_utils import ReplayBuffer, policy, train_step, ExpCfg
 
 def run_experiment(cfg: ExpCfg, train_dir: str, seed=0):
