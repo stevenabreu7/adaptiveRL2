@@ -1,0 +1,3 @@
+[submodule "ControlGym"]
+	path = ControlGym
+	url = https://github.com/SensorsINI/ControlGym.git
