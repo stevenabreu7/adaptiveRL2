@@ -6,3 +6,8 @@ optax
 numpy
 gymnasium
 scipy
+matplotlib
+# for the inverted pendulum
+mujoco
+imageio
+tqdm
