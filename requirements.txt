@@ -5,3 +5,4 @@ orbax
 optax
 numpy
 gymnasium
+scipy
