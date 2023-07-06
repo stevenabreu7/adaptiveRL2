@@ -140,9 +140,9 @@ if __name__ == "__main__":
     seed = 0
     n_episodes = 1_000
     max_timesteps = 1_000
-    buffer_size = 10_000
+    buffer_size = 100_000
     learning_rate = 1e-3 # 3e-4
-    batch_size = 128 # 256
+    batch_size = 256 # 256
     # discount factor
     gamma = 0.99
     # frequency of training the policy (delayed)
@@ -150,9 +150,9 @@ if __name__ == "__main__":
     # target smoothing coefficient
     tau = 0.005
     # number of initial random steps
-    learning_starts = 1_000 # 25_000
+    learning_starts = 25_000 # 25_000
     # scale of exploration noise
-    exploration_noise = 0.1
+    exploration_noise = 1e-3
 
     # env_name = 'MountainCarContinuous-v0'
     env_name = 'InvertedPendulum-v4'
@@ -205,6 +205,31 @@ if __name__ == "__main__":
         tx=optax.adam(learning_rate=learning_rate)
     )
 
+    print('exploration phase')
+    global_step = 0
+    for episode in tqdm(range(learning_starts)):
+        if global_step > learning_starts:
+            break
+        state, _ = env.reset()
+        ep_reward = 0
+        for timestep in range(max_timesteps):
+            # if not learning, sample random action (exploration)
+            action = env.action_space.sample()
+            # step the environment
+            next_state, reward, done, trunc, info = env.step(action)
+            # jax.debug.breakpoint()
+            ep_reward += reward
+            # TODO should we handle trunc first?
+            replay_buffer.add(state, action, reward, next_state, done)
+            # update state (don't use the real next state?)
+            state = next_state
+            global_step += 1
+            if done or trunc: break
+        # store number of timesteps
+        logger.write_scalar(scalar=timestep, filename='ep_timesteps', idx=episode)
+        logger.write_scalar(scalar=ep_reward, filename='ep_reward', idx=episode)
+
+    print('training phase')
     global_step = 0
     for episode in tqdm(range(n_episodes)):
         ep_start_time = time.time()
@@ -212,17 +237,12 @@ if __name__ == "__main__":
         ep_reward = 0
 
         for timestep in range(max_timesteps):
-              
-            if global_step < learning_starts:
-                # if not learning, sample random action (exploration)
-                action = env.action_space.sample()
-            else:
-                # if learning, sample action from actor, with noise
-                action = actor.apply(actor_state.params, state)
-                action_noise = jax.random.normal(key) * scale_action * exploration_noise
-                action = (jax.device_get(action) + action_noise).clip(
-                    env.action_space.low, env.action_space.high
-                )
+            # if learning, sample action from actor, with noise
+            action = actor.apply(actor_state.params, state)
+            action_noise = jax.random.normal(key) * scale_action * exploration_noise
+            action = (jax.device_get(action) + action_noise).clip(
+                env.action_space.low, env.action_space.high
+            )
 
             # step the environment
             next_state, reward, done, trunc, info = env.step(action)
@@ -233,24 +253,23 @@ if __name__ == "__main__":
             # update state (don't use the real next state?)
             state = next_state
 
-            if global_step > learning_starts:
-                # do learning step: sample, update critic, update actor (every N)
-                s, a, r, n, d = replay_buffer.sample(batch_size)
-                qf_state, qf_loss, qf_a = update_critic(
-                    actor_state, qf_state,
-                    s, a, n, r, d, gamma
+            # do learning step: sample, update critic, update actor (every N)
+            s, a, r, n, d = replay_buffer.sample(batch_size)
+            qf_state, qf_loss, qf_a = update_critic(
+                actor_state, qf_state,
+                s, a, n, r, d, gamma
+            )
+            if global_step % policy_frequency == 0:
+                actor_state, qf_state, actor_loss = update_actor(
+                    actor_state, qf_state, s, tau
                 )
-                if global_step % policy_frequency == 0:
-                    actor_state, qf_state, actor_loss = update_actor(
-                        actor_state, qf_state, s, tau
-                    )
-                # store logs
-                if global_step % 100 == 0:
-                    ep_dur = time.time() - ep_start_time
-                    logger.write_scalar(scalar=qf_loss, filename='qf_loss', idx=global_step)
-                    logger.write_scalar(scalar=actor_loss, filename='actor_loss', idx=global_step)
-                    logger.write_scalar(scalar=qf_a, filename='qf_a_values', idx=global_step)
-                    logger.write_scalar(scalar=ep_dur, filename='ep_dur', idx=global_step)
+            # store logs
+            if global_step % 100 == 0:
+                ep_dur = time.time() - ep_start_time
+                logger.write_scalar(scalar=qf_loss, filename='qf_loss', idx=global_step)
+                logger.write_scalar(scalar=actor_loss, filename='actor_loss', idx=global_step)
+                logger.write_scalar(scalar=qf_a, filename='qf_a_values', idx=global_step)
+                logger.write_scalar(scalar=ep_dur, filename='ep_dur', idx=global_step)
 
             # TODO handle truncated better? for now just reset env
             if trunc or done:
@@ -273,64 +292,3 @@ if __name__ == "__main__":
         # store number of timesteps
         logger.write_scalar(scalar=timestep, filename='ep_timesteps', idx=episode)
         logger.write_scalar(scalar=ep_reward, filename='ep_reward', idx=episode)
-
-    # total_timesteps = 1_000_000
-    # for global_step in range(total_timesteps):
-    #     if global_step < learning_starts:
-    #         # if not learning, sample random action (exploration)
-    #         action = env.action_space.sample()
-    #     else:
-    #         # if learning, sample action from actor, with noise
-    #         action = actor.apply(actor_state.params, state)
-    #         action_noise = jax.random.normal(key) * scale_action * exploration_noise
-    #         action = (jax.device_get(action) + action_noise).clip(
-    #             env.action_space.low, env.action_space.high
-    #         )
-
-    #     next_state, reward, done, trunc, info = env.step(action)
-    #     logger.write_scalar(reward, 'reward', global_step, update_freq=100)
-
-    #     # record rewards
-    #     if "final_info" in info:
-    #         for info in info["final_info"]:
-    #             print('global_step={}, ep_ret={}, ep_len={}'.format(
-    #                 global_step, info["episode"]["r"], info["episode"]["l"]
-    #             ))
-    #             break
-        
-    #     # handle terminal_observation - check if truncated
-    #     # real next state is used to train the agent
-    #     # real_next_state = next_state.copy()
-    #     # for idx, d in enumerate(trunc):
-    #         # if d:
-    #             # jax.debug.breakpoint()
-    #             # real_next_state[idx] = info['final_observation'][idx]
-
-    #     # TODO should we reset the env here?
-    #     # TODO: what does truncated do in this env?
-    #     if trunc:
-    #         next_state, _ = env.reset()
-    #         print('truncated')
-
-    #     # TODO should we store the real next state here? or should we reset env?
-    #     replay_buffer.add(state, action, reward, next_state, done)
-    #     # update state (don't use the real next state?)
-    #     state = next_state
-
-    #     if global_step > learning_starts:
-    #         s, a, r, n, d = replay_buffer.sample(batch_size)
-    #         qf_state, qf_loss, qf_a = update_critic(
-    #             actor_state, qf_state,
-    #             s, a, n, r, d, gamma
-    #         )
-    #         if global_step % policy_frequency == 0:
-    #             actor_state, qf_state, actor_loss = update_actor(
-    #                 actor_state, qf_state, s, tau
-    #             )
-    #         if global_step % 100 == 0:
-    #             sps = int(global_step / (time.time() - start_time))
-    #             print('seconds/step:', sps)
-    #             logger.write_scalar(scalar=qf_loss, filename='qf_loss', idx=global_step)
-    #             logger.write_scalar(scalar=actor_loss, filename='actor_loss', idx=global_step)
-    #             logger.write_scalar(scalar=qf_a, filename='qf_a_values', idx=global_step)
-    #             logger.write_scalar(scalar=sps, filename='sps', idx=global_step)
