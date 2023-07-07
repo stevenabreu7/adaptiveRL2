@@ -16,9 +16,6 @@ class LmuMlp(nn.Module):
         x: jnp.ndarray,
         state: Optional[jnp.ndarray] = None,
     ):
-        outputs = []
-        cell = lmu_jax.LMUCell(self.lmu_input, self.lmu_q)
-        linear = nn.Dense(self.lmu_input * self.lmu_q, self.dense_output)
-        x, state = cell(x, state)
-        x = linear(x)
-        return outputs, state
+        x, state = lmu_jax.LMUCell(self.lmu_input, self.lmu_q)(x, state)
+        x = nn.Dense(self.dense_output)(x)
+        return x, state

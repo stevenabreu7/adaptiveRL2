@@ -1,5 +1,6 @@
 from typing import NamedTuple, Sequence, Tuple, Optional
 
+import numpy as np
 from scipy.linalg import expm
 from scipy.special import legendre
 
@@ -33,6 +34,9 @@ class LMUCell(nn.Module):
                 )
         return A / self.theta, B / self.theta
 
+    def _calc_expm(self, A):
+        return expm(A * self.dt)
+
     @nn.compact
     def __call__(self, x: jnp.ndarray, state: Optional[jnp.ndarray] = None):
         A = self.param("A", lambda _: self._calculate_initial()[0])
@@ -43,7 +47,8 @@ class LMUCell(nn.Module):
 
         # Handle the fact that we're discretizing the time step
         #  https://en.wikipedia.org/wiki/Discretization#Discretization_of_linear_state_space_models
-        Ad = expm(A * self.dt)
+        result_shape = jax.ShapeDtypeStruct(A.shape, jnp.float32)
+        Ad = jax.pure_callback(self._calc_expm, result_shape, A)
         Bd = jnp.dot(jnp.dot(jnp.linalg.inv(A), (Ad - jnp.eye(self.q))), B)
 
         # this code will be called every timestep
