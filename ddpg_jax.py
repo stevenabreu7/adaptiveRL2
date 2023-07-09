@@ -337,18 +337,6 @@ if __name__ == "__main__":
             # TODO handle truncated better? for now just reset env
             if trunc or done:
                 break
-            # handle terminal_observation - check if truncated
-            # real next state is used to train the agent
-            # real_next_state = next_state.copy()
-            # for idx, d in enumerate(trunc):
-                # if d:
-                    # jax.debug.breakpoint()
-                    # real_next_state[idx] = info['final_observation'][idx]
-            # TODO should we reset the env here?
-            # TODO: what does truncated do in this env?
-            # if trunc:
-            #     next_state, _ = env.reset()
-            #     print('truncated')
 
             global_step += 1
         
