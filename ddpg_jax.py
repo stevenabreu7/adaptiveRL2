@@ -1,3 +1,4 @@
+# TODO: make LMU cell fixed (not trainable)
 import jax
 import jax.numpy as jnp
 import gymnasium as gym
@@ -12,9 +13,11 @@ from collections import namedtuple, deque
 from flax.training.train_state import TrainState
 from tqdm import tqdm
 from typing import Sequence
+from models.lmu_jax import LMUCell
 
 
 Experience = namedtuple("experience", "state action reward next_state done")
+ExperienceLMU = namedtuple("experience", "state action reward next_state done lmu_state lmu_next_state")
 
 class Logger:
     def __init__(self, log_folder, update_freq=10) -> None:
@@ -65,6 +68,29 @@ class ReplayBuffer:
 	def __len__(self):
 		return len(self.memory)
 
+class ReplayBufferLMU:
+	"""Replay buffer to store and sample experience tuples."""
+
+	def __init__(self, buffer_size: int):
+		self.memory = deque(maxlen=buffer_size)
+
+	def add(self, state, action, reward, next_state, done, lmu_state, lmu_next_state):
+		e = ExperienceLMU(state, action, reward, next_state, done, lmu_state, lmu_next_state)
+		self.memory.append(e)
+
+	def sample(self, batch_size: int) -> Sequence[jnp.ndarray]:
+		"""Randomly sample a batch of experiences from memory."""
+        # NOTE: do we have to do something about the random seed here?
+		s, a, r, n, d, l, ln = zip(*random.sample(self.memory, k=batch_size))
+		return (
+			jnp.vstack(s, dtype=float), jnp.vstack(a, dtype=int), jnp.vstack(r, dtype=float),
+			jnp.vstack(n, dtype=float), jnp.vstack(d, dtype=float), jnp.vstack(l, dtype=float), 
+            jnp.vstack(ln, dtype=float)
+		)
+
+	def __len__(self):
+		return len(self.memory)
+
 class QNetwork(nn.Module):
     """Q Network: (state, action) -> Q-value."""
     @nn.compact
@@ -97,19 +123,26 @@ class Actor(nn.Module):
 class DDPGTrainState(TrainState):
     target_params: flax.core.FrozenDict
 
+def merge_env_state_lmu_state(env_state: np.ndarray, lmu_state: np.ndarray):
+    # dim: (batch_size, env_state_dim | lmu_state_dim)
+    return jnp.concatenate([env_state, lmu_state], axis=1)
+
 @jax.jit
 def update_critic(actor_state: DDPGTrainState, qf_state: DDPGTrainState, states: np.ndarray,
                   actions: np.ndarray, next_states: np.ndarray, rewards: np.ndarray,
-                  dones: np.ndarray, gamma: float):
+                  dones: np.ndarray, lmu_states: np.ndarray, lmu_next_states: np.ndarray, 
+                  gamma: float):
     # NOTE: changed actor.apply -> actor_state.apply_fn
-    next_state_actions = actor_state.apply_fn(actor_state.target_params, next_states)
+    merged_states = merge_env_state_lmu_state(states, lmu_states)
+    merged_next_states = merge_env_state_lmu_state(next_states, lmu_next_states) 
+    next_state_actions = actor_state.apply_fn(actor_state.target_params, merged_next_states)
     next_state_actions = next_state_actions.clip(-1, 1)  # TODO: proper clip
-    qf_next_target = qf_state.apply_fn(qf_state.target_params, next_states, 
+    qf_next_target = qf_state.apply_fn(qf_state.target_params, merged_next_states, 
                                          next_state_actions).reshape(-1)
     next_q_value = (rewards.squeeze(1) + (1 - dones.squeeze(1)) * gamma * (qf_next_target)).reshape(-1)
 
     def mse_loss(params):
-        qf_a_values = qf_state.apply_fn(params, states, actions).squeeze()
+        qf_a_values = qf_state.apply_fn(params, merged_states, actions).squeeze()
         return ((qf_a_values - next_q_value) ** 2).mean(), qf_a_values.mean()
 
     (qf_loss, qf_a), grads = jax.value_and_grad(mse_loss, has_aux=True)(qf_state.params)
@@ -118,11 +151,12 @@ def update_critic(actor_state: DDPGTrainState, qf_state: DDPGTrainState, states:
 
 @jax.jit
 def update_actor(actor_state: DDPGTrainState, qf_state: DDPGTrainState, states: np.ndarray,
-                 tau: float):
+                 lmu_states: np.ndarray, tau: float):
     # tau: step size for the optimizer
     def actor_loss(params):
+        merged_states = merge_env_state_lmu_state(states, lmu_states)
         loss = -qf_state.apply_fn(
-             qf_state.params, states, actor.apply(params, states)
+             qf_state.params, merged_states, actor.apply(params, merged_states)
         ).mean()
         return loss
 
@@ -151,8 +185,15 @@ if __name__ == "__main__":
     tau = 0.005
     # number of initial random steps
     learning_starts = 25_000 # 25_000
+    learning_starts = 1_000
     # scale of exploration noise
     exploration_noise = 1e-3
+
+    # parameters for LMU to encode the state
+    lmu_dim_out = 8
+    lmu_theta = 4
+    lmu_decay = 0.5
+    lmu_dt = 1.0
 
     # env_name = 'MountainCarContinuous-v0'
     env_name = 'InvertedPendulum-v4'
@@ -175,7 +216,7 @@ if __name__ == "__main__":
     sample_action = env.action_space.sample()
 
     # setup replay buffer
-    replay_buffer = ReplayBuffer(buffer_size=buffer_size)
+    replay_buffer = ReplayBufferLMU(buffer_size=buffer_size)
 
     # setup networks
     scale_action = jnp.array((env.action_space.high - env.action_space.low) / 2.)
@@ -194,51 +235,71 @@ if __name__ == "__main__":
     # setup (custom) training states
     actor_state = DDPGTrainState.create(
         apply_fn=actor.apply,
-        params=actor.init(actor_key, sample_state),
-        target_params=actor.init(actor_key, sample_state),
+        params=actor.init(actor_key, jnp.zeros(dim_state+lmu_dim_out*lmu_theta)),
+        target_params=actor.init(actor_key, jnp.zeros(dim_state+lmu_dim_out*lmu_theta)),
         tx=optax.adam(learning_rate=learning_rate)
     )
     qf_state = DDPGTrainState.create(
         apply_fn=qf.apply,
-        params=qf.init(qf_key, sample_state, sample_action),
-        target_params=qf.init(qf_key, sample_state, sample_action),
+        params=qf.init(qf_key, jnp.zeros(dim_state+lmu_dim_out*lmu_theta), sample_action),
+        target_params=qf.init(qf_key, jnp.zeros(dim_state+lmu_dim_out*lmu_theta), sample_action),
         tx=optax.adam(learning_rate=learning_rate)
     )
 
     print('exploration phase')
-    global_step = 0
-    for episode in tqdm(range(learning_starts)):
-        if global_step > learning_starts:
-            break
-        state, _ = env.reset()
-        ep_reward = 0
-        for timestep in range(max_timesteps):
-            # if not learning, sample random action (exploration)
-            action = env.action_space.sample()
-            # step the environment
-            next_state, reward, done, trunc, info = env.step(action)
-            # jax.debug.breakpoint()
-            ep_reward += reward
-            # TODO should we handle trunc first?
-            replay_buffer.add(state, action, reward, next_state, done)
-            # update state (don't use the real next state?)
-            state = next_state
-            global_step += 1
-            if done or trunc: break
-        # store number of timesteps
-        logger.write_scalar(scalar=timestep, filename='ep_timesteps', idx=episode)
-        logger.write_scalar(scalar=ep_reward, filename='ep_reward', idx=episode)
+    ep_reward = 0
+    last_ep_end = 0
+    state, _ = env.reset()
+    # setup LMU encoder
+    lmu_kwargs = {'size_in': dim_state, 'q': lmu_dim_out, 'theta': lmu_theta, 'decay': lmu_decay, 'dt': lmu_dt}
+    lmu = LMUCell(**lmu_kwargs)
+    lmu_params = lmu.init(key, jnp.ones((1, dim_state)))
+    lmu_state = None
+    for step in tqdm(range(learning_starts)):
+        # compute LMU encoding -> of size (dim_env_state * lmu_dim_out (i.e. q))
+        lmu_output, lmu_state = lmu.apply(lmu_params, jnp.array(state), lmu_state)
+        # print('LMU output & state:', lmu_output.shape, lmu_state.shape)
+        # # jax.debug.breakpoint()
+        # sample random action
+        action = env.action_space.sample()
+        # step the environment
+        next_state, reward, done, trunc, info = env.step(action)
+        ep_reward += reward
+        # compute next state LMU encoding
+        lmu_next_output, lmu_next_state = lmu.apply(lmu_params, jnp.array(next_state), lmu_state)
+        # store experience to replay buffer
+        replay_buffer.add(state, action, reward, next_state, done, lmu_output, lmu_next_output)
+        # update state
+        state = next_state
+        if done or trunc: 
+            # move to next episode (store episode statistics)
+            state, _ = env.reset()
+            logger.write_scalar(scalar=step-last_ep_end, filename='ep_timesteps', idx=0)
+            logger.write_scalar(scalar=ep_reward, filename='ep_reward', idx=0)
+            ep_reward = 0
+            last_ep_end = step
+            # reset LMU
+            lmu_params = lmu.init(key, jnp.ones((1, dim_state)))
+            lmu_state = None
 
     print('training phase')
     global_step = 0
+    # setup LMU encoder
+    lmu_kwargs = {'size_in': dim_state, 'q': lmu_dim_out, 'theta': lmu_theta, 'decay': lmu_decay, 'dt': lmu_dt}
+    lmu = LMUCell(**lmu_kwargs)
+    lmu_params = lmu.init(key, jnp.ones((1, dim_state)))
+    lmu_state = None
     for episode in tqdm(range(n_episodes)):
         ep_start_time = time.time()
         state, _ = env.reset()
         ep_reward = 0
 
         for timestep in range(max_timesteps):
-            # if learning, sample action from actor, with noise
-            action = actor.apply(actor_state.params, state)
+            # compute LMU encoding -> of size (dim_env_state * lmu_dim_out (i.e. q))
+            lmu_output, lmu_state = lmu.apply(lmu_params, jnp.array(state), lmu_state)
+            merged_state = np.concatenate([state, lmu_output])
+            # sample action from actor, with noise
+            action = actor.apply(actor_state.params, merged_state)
             action_noise = jax.random.normal(key) * scale_action * exploration_noise
             action = (jax.device_get(action) + action_noise).clip(
                 env.action_space.low, env.action_space.high
@@ -248,20 +309,23 @@ if __name__ == "__main__":
             next_state, reward, done, trunc, info = env.step(action)
             ep_reward += reward
 
+            # compute LMU encoding for next state
+            lmu_next_output, lmu_next_state = lmu.apply(lmu_params, jnp.array(next_state), lmu_state)
+
             # TODO should we handle trunc first?
-            replay_buffer.add(state, action, reward, next_state, done)
+            replay_buffer.add(state, action, reward, next_state, done, lmu_output, lmu_next_output)
             # update state (don't use the real next state?)
             state = next_state
 
             # do learning step: sample, update critic, update actor (every N)
-            s, a, r, n, d = replay_buffer.sample(batch_size)
+            s, a, r, n, d, l, ln = replay_buffer.sample(batch_size)
             qf_state, qf_loss, qf_a = update_critic(
                 actor_state, qf_state,
-                s, a, n, r, d, gamma
+                s, a, n, r, d, l, ln, gamma
             )
             if global_step % policy_frequency == 0:
                 actor_state, qf_state, actor_loss = update_actor(
-                    actor_state, qf_state, s, tau
+                    actor_state, qf_state, s, l, tau
                 )
             # store logs
             if global_step % 100 == 0:
@@ -288,6 +352,10 @@ if __name__ == "__main__":
             #     print('truncated')
 
             global_step += 1
+        
+        # episode ended -> reset LMU
+        lmu_params = lmu.init(key, jnp.ones((1, dim_state)))
+        lmu_state = None
 
         # store number of timesteps
         logger.write_scalar(scalar=timestep, filename='ep_timesteps', idx=episode)
