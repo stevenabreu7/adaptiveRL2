@@ -1,5 +1,8 @@
 # project-specific
 logs
+DG-27s-and-1s500ms-noisy-u
+.venv
+.mpcvenv
 
 # Byte-compiled / optimized / DLL files
 .vscode
