@@ -185,7 +185,6 @@ if __name__ == "__main__":
     tau = 0.005
     # number of initial random steps
     learning_starts = 25_000 # 25_000
-    learning_starts = 1_000
     # scale of exploration noise
     exploration_noise = 1e-3
 
