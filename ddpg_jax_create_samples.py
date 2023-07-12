@@ -8,7 +8,6 @@ import time
 from collections import namedtuple, deque
 from tqdm import tqdm
 from typing import Sequence
-from models.lmu_jax import LMUCell
 
 
 Experience = namedtuple("experience", "state action reward next_state done")
