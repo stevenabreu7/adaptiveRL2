@@ -176,7 +176,7 @@ if __name__ == "__main__":
     max_timesteps = 1_000
     buffer_size = 100_000
     learning_rate = 1e-3 # 3e-4
-    batch_size = 256 # 256
+    batch_size = 12 # 256
     # discount factor
     gamma = 0.99
     # frequency of training the policy (delayed)
@@ -184,7 +184,7 @@ if __name__ == "__main__":
     # target smoothing coefficient
     tau = 0.005
     # number of initial random steps
-    learning_starts = 25_000 # 25_000
+    learning_starts = 25# 25_000
     # scale of exploration noise
     exploration_noise = 1e-3
 
@@ -258,7 +258,6 @@ if __name__ == "__main__":
         # compute LMU encoding -> of size (dim_env_state * lmu_dim_out (i.e. q))
         lmu_output, lmu_state = lmu.apply(lmu_params, jnp.array(state), lmu_state)
         # print('LMU output & state:', lmu_output.shape, lmu_state.shape)
-        # # jax.debug.breakpoint()
         # sample random action
         action = env.action_space.sample()
         # step the environment
@@ -281,69 +280,71 @@ if __name__ == "__main__":
             lmu_params = lmu.init(key, jnp.ones((1, dim_state)))
             lmu_state = None
 
-    print('training phase')
-    global_step = 0
-    # setup LMU encoder
-    lmu_kwargs = {'size_in': dim_state, 'q': lmu_dim_out, 'theta': lmu_theta, 'decay': lmu_decay, 'dt': lmu_dt}
-    lmu = LMUCell(**lmu_kwargs)
-    lmu_params = lmu.init(key, jnp.ones((1, dim_state)))
-    lmu_state = None
-    for episode in tqdm(range(n_episodes)):
-        ep_start_time = time.time()
-        state, _ = env.reset()
-        ep_reward = 0
 
-        for timestep in range(max_timesteps):
-            # compute LMU encoding -> of size (dim_env_state * lmu_dim_out (i.e. q))
-            lmu_output, lmu_state = lmu.apply(lmu_params, jnp.array(state), lmu_state)
-            merged_state = np.concatenate([state, lmu_output])
-            # sample action from actor, with noise
-            action = actor.apply(actor_state.params, merged_state)
-            action_noise = jax.random.normal(key) * scale_action * exploration_noise
-            action = (jax.device_get(action) + action_noise).clip(
-                env.action_space.low, env.action_space.high
-            )
-
-            # step the environment
-            next_state, reward, done, trunc, info = env.step(action)
-            ep_reward += reward
-
-            # compute LMU encoding for next state
-            lmu_next_output, lmu_next_state = lmu.apply(lmu_params, jnp.array(next_state), lmu_state)
-
-            # TODO should we handle trunc first?
-            replay_buffer.add(state, action, reward, next_state, done, lmu_output, lmu_next_output)
-            # update state (don't use the real next state?)
-            state = next_state
-
-            # do learning step: sample, update critic, update actor (every N)
-            s, a, r, n, d, l, ln = replay_buffer.sample(batch_size)
-            qf_state, qf_loss, qf_a = update_critic(
-                actor_state, qf_state,
-                s, a, n, r, d, l, ln, gamma
-            )
-            if global_step % policy_frequency == 0:
-                actor_state, qf_state, actor_loss = update_actor(
-                    actor_state, qf_state, s, l, tau
-                )
-            # store logs
-            if global_step % 100 == 0:
-                ep_dur = time.time() - ep_start_time
-                logger.write_scalar(scalar=qf_loss, filename='qf_loss', idx=global_step)
-                logger.write_scalar(scalar=actor_loss, filename='actor_loss', idx=global_step)
-                logger.write_scalar(scalar=qf_a, filename='qf_a_values', idx=global_step)
-                logger.write_scalar(scalar=ep_dur, filename='ep_dur', idx=global_step)
-
-            # TODO handle truncated better? for now just reset env
-            if trunc or done:
-                break
-
-            global_step += 1
-        
-        # episode ended -> reset LMU
+    with jax.profiler.trace("/tmp/jaxtrace"):
+        print('training phase')
+        global_step = 0
+        # setup LMU encoder
+        lmu_kwargs = {'size_in': dim_state, 'q': lmu_dim_out, 'theta': lmu_theta, 'decay': lmu_decay, 'dt': lmu_dt}
+        lmu = LMUCell(**lmu_kwargs)
         lmu_params = lmu.init(key, jnp.ones((1, dim_state)))
         lmu_state = None
+        for episode in tqdm(range(n_episodes)):
+            ep_start_time = time.time()
+            state, _ = env.reset()
+            ep_reward = 0
 
-        # store number of timesteps
-        logger.write_scalar(scalar=timestep, filename='ep_timesteps', idx=episode)
-        logger.write_scalar(scalar=ep_reward, filename='ep_reward', idx=episode)
+            for timestep in range(max_timesteps):
+                # compute LMU encoding -> of size (dim_env_state * lmu_dim_out (i.e. q))
+                lmu_output, lmu_state = lmu.apply(lmu_params, jnp.array(state), lmu_state)
+                merged_state = np.concatenate([state, lmu_output])
+                # sample action from actor, with noise
+                action = actor.apply(actor_state.params, merged_state)
+                action_noise = jax.random.normal(key) * scale_action * exploration_noise
+                action = (jax.device_get(action) + action_noise).clip(
+                    env.action_space.low, env.action_space.high
+                )
+
+                # step the environment
+                next_state, reward, done, trunc, info = env.step(action)
+                ep_reward += reward
+
+                # compute LMU encoding for next state
+                lmu_next_output, lmu_next_state = lmu.apply(lmu_params, jnp.array(next_state), lmu_state)
+
+                # TODO should we handle trunc first?
+                replay_buffer.add(state, action, reward, next_state, done, lmu_output, lmu_next_output)
+                # update state (don't use the real next state?)
+                state = next_state
+
+                # do learning step: sample, update critic, update actor (every N)
+                s, a, r, n, d, l, ln = replay_buffer.sample(batch_size)
+                qf_state, qf_loss, qf_a = update_critic(
+                    actor_state, qf_state,
+                    s, a, n, r, d, l, ln, gamma
+                )
+                if global_step % policy_frequency == 0:
+                    actor_state, qf_state, actor_loss = update_actor(
+                        actor_state, qf_state, s, l, tau
+                    )
+                # store logs
+                if global_step % 100 == 0:
+                    ep_dur = time.time() - ep_start_time
+                    logger.write_scalar(scalar=qf_loss, filename='qf_loss', idx=global_step)
+                    logger.write_scalar(scalar=actor_loss, filename='actor_loss', idx=global_step)
+                    logger.write_scalar(scalar=qf_a, filename='qf_a_values', idx=global_step)
+                    logger.write_scalar(scalar=ep_dur, filename='ep_dur', idx=global_step)
+
+                # TODO handle truncated better? for now just reset env
+                if trunc or done:
+                    break
+
+                global_step += 1
+            
+            # episode ended -> reset LMU
+            lmu_params = lmu.init(key, jnp.ones((1, dim_state)))
+            lmu_state = None
+
+            # store number of timesteps
+            logger.write_scalar(scalar=timestep, filename='ep_timesteps', idx=episode)
+            logger.write_scalar(scalar=ep_reward, filename='ep_reward', idx=episode)

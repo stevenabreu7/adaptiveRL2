@@ -16,6 +16,23 @@ class LmuMlp(nn.Module):
         x: jnp.ndarray,
         state: Optional[jnp.ndarray] = None,
     ):
-        x, state = lmu_jax.LMUCell(self.lmu_input, self.lmu_q)(x, state)
+        x, state = lmu_jax.LMUCellCompact(self.lmu_input, self.lmu_q)(x, state)
         x = nn.Dense(self.dense_output)(x)
         return x, state
+
+class LmuMlpWithAction(nn.Module):
+    lmu_input: int
+    lmu_q: int
+    dense_output: int
+
+    @nn.compact
+    def __call__(
+        self,
+        x: jnp.ndarray,
+        state: Optional[jnp.ndarray] = None,
+    ):
+        env_state, action = x[:4], x[4:]
+        env_state, state = lmu_jax.LMUCellCompact(self.lmu_input, self.lmu_q)(env_state, state)
+        action_x = jnp.concatenate((env_state, action))
+        action_x = nn.Dense(self.dense_output)(action_x)
+        return action_x, state
