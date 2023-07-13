@@ -28,9 +28,15 @@ class LMUCell(nn.Module):
 
         iz, hz, mz = self.input_size, self.hidden_size, self.memory_size
 
-        self.e_x = self.param("e_x", nn.initializers.lecun_uniform(), (self.input_size, 1))
-        self.e_h = self.param("e_h", nn.initializers.lecun_uniform(), (self.hidden_size, 1))
-        self.e_m = self.param("e_m", nn.initializers.lecun_uniform(), (self.memory_size, 1))
+        self.e_x = self.param(
+            "e_x", nn.initializers.lecun_uniform(), (self.input_size, 1)
+        )
+        self.e_h = self.param(
+            "e_h", nn.initializers.lecun_uniform(), (self.hidden_size, 1)
+        )
+        self.e_m = self.param(
+            "e_m", nn.initializers.lecun_uniform(), (self.memory_size, 1)
+        )
 
         self.W_in = self.param("W_in", nn.initializers.xavier_normal(), (iz, hz))
         self.W_h = self.param("W_h", nn.initializers.xavier_normal(), (hz, hz))
@@ -38,24 +44,25 @@ class LMUCell(nn.Module):
 
     def calc_AB(self):
         Q = np.arange(self.memory_size, dtype=np.float64).reshape(-1, 1)
-        R = (2*Q + 1) / self.theta
+        R = (2 * Q + 1) / self.theta
         i, j = np.meshgrid(Q, Q, indexing="ij")
 
         A = R * np.where(i < j, -1, (-1.0) ** (i - j + 1))  # (memory_size, memory_size)
-        B = R * ((-1.0) ** Q)                               # (memory_size, 1)
+        B = R * ((-1.0) ** Q)  # (memory_size, 1)
         C = np.ones((1, self.memory_size))
         D = np.zeros((1,))
 
         A, B, C, D, _ = cont2discrete((A, B, C, D), self.dt, method="zoh")
 
         return A, B.T
-    
-    def __call__(self, x: jnp.array, state: Tuple[jnp.ndarray, jnp.ndarray] = None):
 
+    def __call__(self, x: jnp.array, state: Tuple[jnp.ndarray, jnp.ndarray] = None):
         if state is None:
-            x = x.reshape(1, -1) if x.ndim == 1 else x
-            state = (jnp.zeros((x.shape[0], self.hidden_size)),
-                     jnp.zeros((x.shape[0], self.memory_size)))
+            # x = x.reshape(1, -1) if x.ndim == 1 else x
+            state = (
+                jnp.zeros((self.hidden_size)),
+                jnp.zeros((self.memory_size)),
+            )
         h, m = state
 
         # compute input to the memory block
@@ -105,12 +112,11 @@ class LDNCell(nn.Module):
         result_shape = jax.ShapeDtypeStruct(A.shape, jnp.float32)
         self.Ad = jax.pure_callback(self._calc_expm, result_shape, A)
         self.Bd = jnp.dot(jnp.dot(jnp.linalg.inv(A), (self.Ad - jnp.eye(self.q))), B)
-        
-    
+
     def __call__(self, x: jnp.array, state: Optional[jnp.ndarray] = None):
         if state is None:
             state = jnp.zeros((self.q, self.size_in))
-        
+
         # this code will be called every timestep
         new_state = (self.Ad @ state) + (self.Bd @ x[None, :])
         return new_state.T.flatten(), new_state
