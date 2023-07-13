@@ -1,3 +1,4 @@
+import argparse
 import dataclasses
 import datetime
 import tqdm
@@ -8,6 +9,9 @@ import flax
 import flax.linen as nn
 import flax.training.train_state as ts
 import optax
+import orbax
+from orbax.checkpoint import CheckpointManagerOptions, Checkpointer, CheckpointManager
+from flax.training.orbax_utils import restore_args_from_target
 import torch.utils.data as td
 from tensorboardX import SummaryWriter
 
@@ -66,7 +70,7 @@ def update_model(state, grads):
     return state.apply_gradients(grads=grads)
 
 
-def create_train_state(rng, config):
+def create_train_state(rng, config, train_state_params=None):
     network = LmuMlpWithAction(
         4, config.lmu_hidden, config.lmu_memory, config.lmu_theta, config.lmu_dim_out,
         learn_a = True, learn_b = True
@@ -87,7 +91,6 @@ def plot_grad(d, writer, step):
 def train_epoch(dataloader, state, writer, epoch):
     for idx, batch in tqdm.tqdm(enumerate(dataloader), leave=False):
         (xs, ys, lengths) = batch
-        lmu_state = None
 
         loss, grads = apply_model(
             state,
@@ -100,15 +103,41 @@ def train_epoch(dataloader, state, writer, epoch):
         plot_grad(grads, writer, (epoch + 1) * idx)
 
 if __name__ == "__main__":
-    key = jax.random.PRNGKey(0)
-    config = Config()
+    # parse data path from argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_path", type=str, default=".")
+    args = parser.parse_args()
+
+    # create tensorboard writer
     timestamp = datetime.datetime.today().strftime("%y%m%d_%H%M")
     writer = SummaryWriter(f"logs/{timestamp}")
 
+    # create checkpoint manager
+    # chpt_dir = f'./tmp/orbax/{timestamp}'
+    chpt_dir = f'./tmp/orbax/230713_1210'
+    mgr_options = CheckpointManagerOptions(create=True, max_to_keep=3,
+                                           keep_period=2, step_prefix='train')
+    chptr = Checkpointer(orbax.checkpoint.PyTreeCheckpointHandler())
+    ckpt_mgr = CheckpointManager(chpt_dir, chptr, mgr_options)
+
+
+    # create training state and data loaders
+    key = jax.random.PRNGKey(0)
+    config = Config()
     train_state = create_train_state(key, config)
-    dataset = data.ExploreDataset()
+    dataset = data.ExploreDataset(args.data_path)
     dataloader = td.DataLoader(dataset, config.batch_size)
+
+    # # load training state from checkpoint
+    restore_args = restore_args_from_target(train_state.params, mesh=None)
+    restored = ckpt_mgr.restore(0, items=train_state.params, 
+                                restore_kwargs={'restore_args': restore_args})
+    # train_state_params = restored['params']
 
     for epoch in tqdm.tqdm(range(100)):
         train_epoch(dataloader, train_state, writer, epoch)
+        save_args = flax.training.orbax_utils.save_args_from_target(train_state.params)
+        # ckpt_mgr.save(epoch, CKPT_PYTREE, save_kwargs={'save_args': save_args})
+        ckpt_mgr.save(epoch, train_state.params, save_kwargs={'save_args': save_args})
+
     writer.flush()
