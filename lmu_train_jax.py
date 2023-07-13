@@ -50,12 +50,12 @@ def apply_model(state, xs, ys, lengths):
                 losses.append(loss_step)
             return jnp.array(losses)
 
-            # return ys
             # Remove padded states
             # nonzero_idx = jnp.argwhere(jnp.sum(pred_state, axis=1) > 0)
             # loss = jnp.abs(pred_state[nonzero_idx] - x1[nonzero_idx]) ** 2
         loss = jax.vmap(loss_fn, out_axes=(0))(xs, ys, lengths)
-        return jnp.mean(xs)
+        # jax.debug.breakpoint()
+        return jnp.mean(loss)
 
     loss, grad = jax.value_and_grad(batch_loss)(state.params)
     return loss, grad
@@ -84,6 +84,20 @@ def plot_grad(d, writer, step):
         else:
             writer.add_histogram(f"train/grad/{k}", v, step)
 
+def train_epoch(dataloader, state, writer, epoch):
+    for idx, batch in tqdm.tqdm(enumerate(dataloader), leave=False):
+        (xs, ys, lengths) = batch
+        lmu_state = None
+
+        loss, grads = apply_model(
+            state,
+            jnp.array(xs),
+            jnp.array(ys),
+            jnp.array(lengths, dtype=jnp.float32),
+        )
+        state = update_model(state, grads)
+        writer.add_scalar("train/loss", loss, (epoch + 1) * idx)
+        plot_grad(grads, writer, (epoch + 1) * idx)
 
 if __name__ == "__main__":
     key = jax.random.PRNGKey(0)
@@ -95,18 +109,6 @@ if __name__ == "__main__":
     dataset = data.ExploreDataset()
     dataloader = td.DataLoader(dataset, config.batch_size)
 
-    for idx, batch in tqdm.tqdm(enumerate(dataloader)):
-        (xs, ys, lengths) = batch
-        lmu_state = None
-
-        loss, grads = apply_model(
-            train_state,
-            jnp.array(xs),
-            jnp.array(ys),
-            jnp.array(lengths, dtype=jnp.float32),
-        )
-        state = update_model(train_state, grads)
-        writer.add_scalar("train/loss", loss, idx)
-        plot_grad(grads, writer, idx)
-
+    for epoch in tqdm.tqdm(range(100)):
+        train_epoch(dataloader, train_state, writer, epoch)
     writer.flush()
