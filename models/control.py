@@ -36,7 +36,7 @@ class LmuMlpWithAction(nn.Module):
         self,
         x: jnp.ndarray,
     ):
-        env_state, action = x[:4], x[4:]
+        env_state, action = x[:self.lmu_input], x[4:]
         env_state = lmu_jax.LMUCell(
             self.lmu_input, self.lmu_hidden, self.lmu_memory, self.lmu_theta, self.learn_a, self.learn_b
         )(env_state)

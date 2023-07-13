@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import flax
 import flax.linen as nn
 import flax.training.train_state as ts
+import flax.training.orbax_utils as ou
 import optax
 import orbax
 from orbax.checkpoint import CheckpointManagerOptions, Checkpointer, CheckpointManager
@@ -30,6 +31,7 @@ class Config:
     lmu_memory: int = 12
     lmu_dim_out: int = 4
 
+
 @jax.jit
 def apply_model(state, xs, ys, lengths):
     def batch_loss(params):
@@ -38,7 +40,7 @@ def apply_model(state, xs, ys, lengths):
             losses = []
             # length = int(l)
             # jax.debug.print("l {l}({l1}), {xs}, {ys}", l=l, xs=xs.shape, ys=ys.shape, l1=length)
-            # indices = 
+            # indices =
             # Remove padded states
             # nonzero_idx = jnp.argwhere(jnp.sum(xs, axis=1) > 0)
             # xs = xs[nonzero_idx]
@@ -57,6 +59,7 @@ def apply_model(state, xs, ys, lengths):
             # Remove padded states
             # nonzero_idx = jnp.argwhere(jnp.sum(pred_state, axis=1) > 0)
             # loss = jnp.abs(pred_state[nonzero_idx] - x1[nonzero_idx]) ** 2
+
         loss = jax.vmap(loss_fn, out_axes=(0))(xs, ys, lengths)
         # jax.debug.breakpoint()
         return jnp.mean(loss)
@@ -70,10 +73,16 @@ def update_model(state, grads):
     return state.apply_gradients(grads=grads)
 
 
-def create_train_state(rng, config, train_state_params=None):
+def create_train_state(rng, config, with_velocities=True):
+    lmu_input = 4 if with_velocities else 2
     network = LmuMlpWithAction(
-        4, config.lmu_hidden, config.lmu_memory, config.lmu_theta, config.lmu_dim_out,
-        learn_a = True, learn_b = True
+        lmu_input,
+        config.lmu_hidden,
+        config.lmu_memory,
+        config.lmu_theta,
+        config.lmu_dim_out,
+        learn_a=True,
+        learn_b=True,
     )
     variables = network.init(rng, jnp.ones([5]))
     state, params = flax.core.pop(variables, "params")
@@ -88,6 +97,7 @@ def plot_grad(d, writer, step):
         else:
             writer.add_histogram(f"train/grad/{k}", v, step)
 
+
 def train_epoch(dataloader, state, writer, epoch):
     for idx, batch in tqdm.tqdm(enumerate(dataloader), leave=False):
         (xs, ys, lengths) = batch
@@ -101,25 +111,33 @@ def train_epoch(dataloader, state, writer, epoch):
         state = update_model(state, grads)
         writer.add_scalar("train/loss", loss, (epoch + 1) * idx)
         plot_grad(grads, writer, (epoch + 1) * idx)
+        break
+    return state
+
 
 if __name__ == "__main__":
-    # parse data path from argparse
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser("Training script for LMU autoencoder")
+    parser.add_argument("--no-velocities", dest="velocities", action="store_false")
     parser.add_argument("--data_path", type=str, default=".")
+    parser.add_argument("--restore", type=str, default=None)
     args = parser.parse_args()
 
-    # create tensorboard writer
+    key = jax.random.PRNGKey(0)
+    config = Config()
     timestamp = datetime.datetime.today().strftime("%y%m%d_%H%M")
     writer = SummaryWriter(f"logs/{timestamp}")
 
     # create checkpoint manager
-    # chpt_dir = f'./tmp/orbax/{timestamp}'
-    chpt_dir = f'./tmp/orbax/230713_1210'
-    mgr_options = CheckpointManagerOptions(create=True, max_to_keep=3,
-                                           keep_period=2, step_prefix='train')
+    chpt_dir = (
+        f"checkpoints/{timestamp}"
+        if args.restore is None
+        else args.restore
+    )
+    mgr_options = CheckpointManagerOptions(
+        create=True, max_to_keep=3, keep_period=2, step_prefix="train"
+    )
     chptr = Checkpointer(orbax.checkpoint.PyTreeCheckpointHandler())
     ckpt_mgr = CheckpointManager(chpt_dir, chptr, mgr_options)
-
 
     # create training state and data loaders
     key = jax.random.PRNGKey(0)
@@ -128,16 +146,18 @@ if __name__ == "__main__":
     dataset = data.ExploreDataset(args.data_path)
     dataloader = td.DataLoader(dataset, config.batch_size)
 
-    # # load training state from checkpoint
-    restore_args = restore_args_from_target(train_state.params, mesh=None)
-    restored = ckpt_mgr.restore(0, items=train_state.params, 
-                                restore_kwargs={'restore_args': restore_args})
-    # train_state_params = restored['params']
+    # load training state from checkpoint
+    if args.restore is not None:
+        step = ckpt_mgr.latest_step()
+        step = 0 if step is None else step
+        ckpt_path = f"{chpt_dir}/train_{step}/default"
+        empty_state = {"model": train_state, "config": dataclasses.asdict(config)}
+        restored = chptr.restore(ckpt_path, item=empty_state)
 
     for epoch in tqdm.tqdm(range(100)):
-        train_epoch(dataloader, train_state, writer, epoch)
-        save_args = flax.training.orbax_utils.save_args_from_target(train_state.params)
-        # ckpt_mgr.save(epoch, CKPT_PYTREE, save_kwargs={'save_args': save_args})
-        ckpt_mgr.save(epoch, train_state.params, save_kwargs={'save_args': save_args})
+        train_state = train_epoch(dataloader, train_state, writer, epoch)
+        ckpt = {"model": train_state, "config": dataclasses.asdict(config)}
+        save_args = flax.training.orbax_utils.save_args_from_target(ckpt)
+        ckpt_mgr.save(epoch, ckpt, save_kwargs={"save_args": save_args})
 
     writer.flush()
