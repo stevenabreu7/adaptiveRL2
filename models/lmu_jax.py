@@ -41,6 +41,8 @@ class LMUCell(nn.Module):
         self.W_in = self.param("W_in", nn.initializers.xavier_normal(), (iz, hz))
         self.W_h = self.param("W_h", nn.initializers.xavier_normal(), (hz, hz))
         self.W_m = self.param("W_m", nn.initializers.xavier_normal(), (mz, hz))
+        self.h = self.variable("state", "h", lambda: jnp.zeros((self.hidden_size)))
+        self.m = self.variable("state", "m", lambda: jnp.zeros((self.memory_size)))
 
     def calc_AB(self):
         Q = np.arange(self.memory_size, dtype=np.float64).reshape(-1, 1)
@@ -56,25 +58,17 @@ class LMUCell(nn.Module):
 
         return A, B.T
 
-    def __call__(self, x: jnp.array, state: Tuple[jnp.ndarray, jnp.ndarray] = None):
-        if state is None:
-            # x = x.reshape(1, -1) if x.ndim == 1 else x
-            state = (
-                jnp.zeros((self.hidden_size)),
-                jnp.zeros((self.memory_size)),
-            )
-        h, m = state
-
+    def __call__(self, x: jnp.array):
         # compute input to the memory block
-        u = x @ self.e_x + h @ self.e_h + m @ self.e_m  # (1,)
+        u = x @ self.e_x + self.h.value @ self.e_h + self.m.value @ self.e_m  # (1,)
 
         # compute new memory state
-        m = m @ self.A + u @ self.B  # (memory_size,)
+        self.m.value = self.m.value @ self.A + u @ self.B  # (memory_size,)
 
         # compute new hidden state
-        h = jnp.tanh(x @ self.W_in + h @ self.W_h + m @ self.W_m)  # (hidden_size,)
+        self.h.value = jnp.tanh(x @ self.W_in + self.h.value @ self.W_h + self.m.value @ self.W_m)  # (hidden_size,)
 
-        return h, m
+        return self.h.value
 
 
 class LDNCell(nn.Module):
