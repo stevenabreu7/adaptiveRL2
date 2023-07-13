@@ -1,61 +1,10 @@
-# TODO: make LMU cell fixed (not trainable)
 import jax
-import jax.numpy as jnp
 import gymnasium as gym
 import numpy as np
 import random
 import time
-from collections import namedtuple, deque
 from tqdm import tqdm
-from typing import Sequence
-
-
-Experience = namedtuple("experience", "state action reward next_state done")
-
-
-class ReplayBuffer:
-    """Replay buffer to store and sample experience tuples."""
-
-    def __init__(self, buffer_size: int):
-        self.memory = deque(maxlen=buffer_size)
-
-    def add(self, state, action, reward, next_state, done):
-        e = Experience(state, action, reward, next_state, done)
-        self.memory.append(e)
-
-    def sample(self, batch_size: int) -> Sequence[jnp.ndarray]:
-        """Randomly sample a batch of experiences from memory."""
-        # NOTE: do we have to do something about the random seed here?
-        s, a, r, n, d = zip(*random.sample(self.memory, k=batch_size))
-        return (
-            jnp.vstack(s, dtype=float),
-            jnp.vstack(a, dtype=float),
-            jnp.vstack(r, dtype=float),
-            jnp.vstack(n, dtype=float),
-            jnp.vstack(d, dtype=float),
-        )
-
-    def __len__(self):
-        return len(self.memory)
-
-    def save_to_file(self, filename: str) -> True:
-        s, a, r, n, d = zip(*list(self.memory))
-        s, a, r, n, d = (
-            jnp.vstack(s, dtype=float),
-            jnp.vstack(a, dtype=float),
-            jnp.vstack(r, dtype=float),
-            jnp.vstack(n, dtype=float),
-            jnp.vstack(d, dtype=float),
-        )
-        np.savez(filename, s=s, a=a, r=r, n=n, d=d)
-        return True
-
-    def load_from_file(self, filename: str) -> bool:
-        x = np.load(filename)
-        s, a, r, n, d = x["s"], x["a"], x["r"], x["n"], x["d"]
-        for i in range(len(s)):
-            self.add(s[i], a[i], r[i], n[i], d[i])
-        return True
+from ddpg_utils import ReplayBuffer
 
 
 if __name__ == "__main__":

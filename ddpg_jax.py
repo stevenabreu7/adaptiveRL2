@@ -2,150 +2,43 @@
 import jax
 import jax.numpy as jnp
 import gymnasium as gym
-import flax
-import flax.linen as nn
 import numpy as np
 import optax
-import os
 import random
 import time
-from collections import namedtuple, deque
-from flax.training.train_state import TrainState
 from tqdm import tqdm
-from typing import Sequence
 from models.lmu_jax import LMUCell
+from collections import deque
+from typing import Sequence
+from ddpg_utils import Logger, ReplayBufferLMU, QNetwork, Actor, DDPGTrainState, Experience
 
 
-Experience = namedtuple("experience", "state action reward next_state done")
-ExperienceLMU = namedtuple(
-    "experience", "state action reward next_state done lmu_state lmu_next_state"
-)
-
-
-class Logger:
-    def __init__(self, log_folder, update_freq=10) -> None:
-        self.log_folder = log_folder
-        os.makedirs(log_folder, exist_ok=True)
-        self.datastore = {}
-        self.counter = {}
-        self.update_freq = update_freq
-
-    def write_array(self, arr: jnp.array, filename: str, idx: int):
-        jnp.save(f"./{self.log_folder}/{filename}_{idx}.npy", arr)
-
-    def write_scalar(self, scalar: float, filename: str, idx: int, update_freq=None):
-        self.datastore[filename] = self.datastore.get(filename, []) + [scalar]
-        # update every self.update_freq steps
-        self.counter[filename] = self.counter.get(filename, 0) + 1
-        ufreq = update_freq if update_freq is not None else self.update_freq
-        if self.counter[filename] >= ufreq:
-            self.save()
-            self.counter[filename] = 0
-
-    def save(self):
-        for filename, data in self.datastore.items():
-            jnp.save(f"./{self.log_folder}/{filename}.npy", np.array(data))
-
-    def close(self):
-        self.save()
-
-
-class ReplayBuffer:
+class TemporalReplayBuffer:
     """Replay buffer to store and sample experience tuples."""
 
     def __init__(self, buffer_size: int):
         self.memory = deque(maxlen=buffer_size)
 
-    def add(self, state, action, reward, next_state, done):
-        e = Experience(state, action, reward, next_state, done)
-        self.memory.append(e)
+    def add(self, experiences: Sequence[Experience]):
+        self.memory.append(experiences)
 
     def sample(self, batch_size: int) -> Sequence[jnp.ndarray]:
-        """Randomly sample a batch of experiences from memory."""
-        # NOTE: do we have to do something about the random seed here?
-        s, a, r, n, d = zip(*random.sample(self.memory, k=batch_size))
-        return (
-            jnp.vstack(s, dtype=float),
-            jnp.vstack(a, dtype=int),
-            jnp.vstack(r, dtype=float),
-            jnp.vstack(n, dtype=float),
-            jnp.vstack(d, dtype=float),
-        )
-
-    def __len__(self):
-        return len(self.memory)
-
-
-class ReplayBufferLMU:
-    """Replay buffer to store and sample experience tuples."""
-
-    def __init__(self, buffer_size: int):
-        self.memory = deque(maxlen=buffer_size)
-
-    def add(self, state, action, reward, next_state, done, lmu_state, lmu_next_state):
-        e = ExperienceLMU(
-            state, action, reward, next_state, done, lmu_state, lmu_next_state
-        )
-        self.memory.append(e)
-
-    def sample(self, batch_size: int) -> Sequence[jnp.ndarray]:
-        """Randomly sample a batch of experiences from memory."""
-        # NOTE: do we have to do something about the random seed here?
-        s, a, r, n, d, l, ln = zip(*random.sample(self.memory, k=batch_size))
-        return (
-            jnp.vstack(s, dtype=float),
-            jnp.vstack(a, dtype=int),
-            jnp.vstack(r, dtype=float),
-            jnp.vstack(n, dtype=float),
-            jnp.vstack(d, dtype=float),
-            jnp.vstack(l, dtype=float),
-            jnp.vstack(ln, dtype=float),
-        )
-
-    def __len__(self):
-        return len(self.memory)
-
-
-class QNetwork(nn.Module):
-    """Q Network: (state, action) -> Q-value."""
-
-    @nn.compact
-    def __call__(self, x: jnp.ndarray, a: jnp.ndarray):
-        x = jnp.concatenate([x, a], -1)
-        x = nn.Dense(256)(x)
-        x = nn.relu(x)
-        x = nn.Dense(256)(x)
-        x = nn.relu(x)
-        x = nn.Dense(1)(x)
-        return x
-
-
-class Actor(nn.Module):
-    """Actor Network: state -> action."""
-
-    action_dim: Sequence[int]
-    action_scale: Sequence[int]
-    action_bias: Sequence[int]
-
-    @nn.compact
-    def __call__(self, x):
-        x = nn.Dense(256)(x)
-        x = nn.relu(x)
-        x = nn.Dense(256)(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.action_dim)(x)
-        x = nn.tanh(x)
-        x = x * self.action_scale + self.action_bias
-        return x
-
-
-class DDPGTrainState(TrainState):
-    target_params: flax.core.FrozenDict
-
-
-def merge_env_state_lmu_state(env_state: np.ndarray, lmu_state: np.ndarray):
-    # dim: (batch_size, env_state_dim | lmu_state_dim)
-    return jnp.concatenate([env_state, lmu_state], axis=1)
+        """Randomly sample a batch of experience sequences from memory."""
+        experiences_list = random.sample(self.memory, k=batch_size)
+        max_len = max([len(experiences) for experiences in experiences_list])
+        exp = experiences_list[0][0]
+        states = jnp.zeros((batch_size, max_len, exp.state.shape[0]))
+        actions = jnp.zeros((batch_size, max_len, exp.action.shape[0]))
+        rewards = jnp.zeros((batch_size, max_len, exp.reward.shape[0]))
+        next_states = jnp.zeros((batch_size, max_len, exp.next_state.shape[0]))
+        dones = jnp.zeros((batch_size, max_len, exp.done.shape[0]))
+        for idx, experiences in enumerate(experiences_list):
+            states[idx, :len(experiences)] = jnp.vstack([e.state for e in experiences])
+            actions[idx, :len(experiences)] = jnp.vstack([e.action for e in experiences])
+            rewards[idx, :len(experiences)] = jnp.vstack([e.reward for e in experiences])
+            next_states[idx, :len(experiences)] = jnp.vstack([e.next_state for e in experiences])
+            dones[idx, :len(experiences)] = jnp.vstack([e.done for e in experiences])
+        return states, actions, rewards, next_states, dones
 
 
 @jax.jit
@@ -220,8 +113,8 @@ if __name__ == "__main__":
     n_episodes = 1_000
     max_timesteps = 1_000
     buffer_size = 100_000
-    learning_rate = 1e-3  # 3e-4
-    batch_size = 12  # 256
+    learning_rate = 1e-3 # 3e-4
+    batch_size = 128 # 256
     # discount factor
     gamma = 0.99
     # frequency of training the policy (delayed)
@@ -229,7 +122,7 @@ if __name__ == "__main__":
     # target smoothing coefficient
     tau = 0.005
     # number of initial random steps
-    learning_starts = 25  # 25_000
+    learning_starts = 25_000 # 25_000
     # scale of exploration noise
     exploration_noise = 1e-3
 
