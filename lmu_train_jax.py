@@ -17,19 +17,8 @@ import torch.utils.data as td
 from tensorboardX import SummaryWriter
 
 import data
-from models.control import LmuMlpWithAction
+from models.control import LmuMlpWithAction, LMUConfig as Config
 from ddpg_jax import Logger
-
-
-@dataclasses.dataclass
-class Config:
-    batch_size = 16
-    learning_rate: float = 1e-3
-    momentum: float = 1e-6
-    lmu_theta: int = 4
-    lmu_hidden: int = 4
-    lmu_memory: int = 12
-    lmu_dim_out: int = 4
 
 
 @jax.jit
@@ -61,7 +50,6 @@ def apply_model(state, xs, ys, lengths):
             # loss = jnp.abs(pred_state[nonzero_idx] - x1[nonzero_idx]) ** 2
 
         loss = jax.vmap(loss_fn, out_axes=(0))(xs, ys, lengths)
-        # jax.debug.breakpoint()
         return jnp.mean(loss)
 
     loss, grad = jax.value_and_grad(batch_loss)(state.params)
@@ -111,7 +99,6 @@ def train_epoch(dataloader, state, writer, epoch):
         state = update_model(state, grads)
         writer.add_scalar("train/loss", loss, (epoch + 1) * idx)
         plot_grad(grads, writer, (epoch + 1) * idx)
-        break
     return state
 
 
@@ -123,9 +110,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     key = jax.random.PRNGKey(0)
-    config = Config()
+    config = Config(with_velocities=args.velocities)
     timestamp = datetime.datetime.today().strftime("%y%m%d_%H%M")
     writer = SummaryWriter(f"logs/{timestamp}")
+    writer.add_hparams(dataclasses.asdict(config), {})
 
     # create checkpoint manager
     chpt_dir = (
@@ -152,7 +140,7 @@ if __name__ == "__main__":
         step = 0 if step is None else step
         ckpt_path = f"{chpt_dir}/train_{step}/default"
         empty_state = {"model": train_state, "config": dataclasses.asdict(config)}
-        restored = chptr.restore(ckpt_path, item=empty_state)
+        train_state = chptr.restore(ckpt_path, item=empty_state)
 
     for epoch in tqdm.tqdm(range(100)):
         train_state = train_epoch(dataloader, train_state, writer, epoch)

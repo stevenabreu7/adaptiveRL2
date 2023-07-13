@@ -1,9 +1,22 @@
+import dataclasses
 from typing import Optional, Tuple
 
 import jax.numpy as jnp
 import flax.linen as nn
 
 from . import lmu_jax
+
+@dataclasses.dataclass
+class LMUConfig:
+    batch_size = 16
+    learning_rate: float = 1e-3
+    momentum: float = 1e-6
+    lmu_theta: int = 4
+    lmu_hidden: int = 4
+    lmu_memory: int = 12
+    lmu_dim_out: int = 4
+    with_velocities: bool = True
+
 
 
 class LmuMlp(nn.Module):
