@@ -21,20 +21,23 @@ import torch.nn.functional as F
 
 
 class BackpropamineRNN(nn.Module):
-    # RNN with trainable modulated plasticity ("backpropamine")
-
-    def __init__(self, isize, hsize, osize, freeze_plasticity=False):
+    # RNN with trainable modulated plasticity ("backpropamine")    
+    def __init__(self, isize, hsize, osize, device='cpu', random_plasticity=False, 
+                 plasticity_noise=0.1):
         super(BackpropamineRNN, self).__init__()
         self.hsize, self.isize = hsize, isize
 
-        self.freeze_plasticity = freeze_plasticity
+        self.random_plasticity = random_plasticity
+        self.device = device
+        self.plasticity_noise = plasticity_noise
 
-        self.i2h = torch.nn.Linear(
-            isize, hsize
-        )  # Weights from input to recurrent layer
-        self.w = torch.nn.Parameter(
-            0.001 * torch.rand(hsize, hsize)
-        )  # Baseline (non-plastic) component of the plastic recurrent layer
+        self.i2h = torch.nn.Linear(isize, hsize)    # Weights from input to recurrent layer
+        self.w =  torch.nn.Parameter(.001 * torch.rand(hsize, hsize))   # Baseline (non-plastic) component of the plastic recurrent layer
+        
+        if not self.random_plasticity:
+            self.alpha =  torch.nn.Parameter(.001 * torch.rand(hsize, hsize))   # Plasticity coefficients of the plastic recurrent layer; one alpha coefficient per recurrent connection
+            #self.alpha = torch.nn.Parameter(.0001 * torch.rand(1,1,hsize))  # Per-neuron alpha
+            #self.alpha = torch.nn.Parameter(.0001 * torch.ones(1))         # Single alpha for whole network
 
         self.alpha = torch.nn.Parameter(
             0.001 * torch.rand(hsize, hsize)
@@ -60,10 +63,15 @@ class BackpropamineRNN(nn.Module):
         # hidden[0] is the h-state (recurrent); hidden[1] is the Hebbian trace
         h_cur, hebb = hidden_hebbian
 
+        # random plasticity or learned plasticity parameter
+        if self.random_plasticity:
+            alpha = torch.rand(self.hsize, self.hsize, device=self.device) * self.plasticity_noise
+        else:
+            alpha = self.alpha
+
         # Each *column* of w, alpha and hebb contains the inputs weights to a single neuron
         h_next = F.tanh(
-            self.i2h(inputs)
-            + h_cur.unsqueeze(1).bmm(self.w + torch.mul(self.alpha, hebb)).squeeze(1)
+            self.i2h(inputs) + h_cur.unsqueeze(1).bmm(self.w + torch.mul(alpha, hebb)).squeeze(1)
         )  # Update the h-state
         outputs = self.h2o(h_next)  # pure linear output
 
