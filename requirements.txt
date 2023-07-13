@@ -11,3 +11,4 @@ matplotlib
 mujoco
 imageio
 tqdm
+tensorboardx
