@@ -10,7 +10,7 @@ from tqdm import tqdm
 from models.lmu_jax import LMUCell
 from collections import deque
 from typing import Sequence
-from ddpg_utils import Logger, ReplayBufferLMU, QNetwork, Actor, DDPGTrainState, Experience
+from ddpg_utils import Logger, ReplayBufferLMU, DDPGTrainState, Experience
 
 
 class TemporalReplayBuffer:
